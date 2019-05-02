@@ -100,8 +100,7 @@ void setupQueue()
 void setupTasks()
 {
   xTaskCreatePinnedToCore(NB_IoTTask, "NB_IoTTask", 4096, NULL, 4, NULL, 0);
-  static int a;
-  a = 4;
+
   xTaskCreatePinnedToCore([](void *parameter) -> void {
     BaseType_t xStatus;
     const TickType_t xTicksToWait = pdMS_TO_TICKS(100);
