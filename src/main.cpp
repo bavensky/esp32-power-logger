@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <Wire.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sqlite3.h>
@@ -6,7 +7,22 @@
 #include <FS.h>
 #include <SD.h>
 #include <FreeRTOS.h>
-#include <Arduino.h>
+
+#include <MqttConnector.h>
+#include <Adafruit_INA219.h>
+Adafruit_INA219 ina219(0x40);
+
+#include "init_mqtt.h"
+#include "_publish.h"
+#include "_receive.h"
+#include "_config.h"
+
+MqttConnector *mqtt;
+
+int relayPin = 15;
+int relayPinState = HIGH;
+int LED_PIN = 2;
+char myName[40];
 
 #include <functional>
 typedef int (*sqlite_cb_t)(void *, int, char **, char **);
@@ -89,7 +105,7 @@ typedef struct
 
 void setupQueue()
 {
-  xQueue = xQueueCreate(100, sizeof(Data_t));
+  xQueue = xQueueCreate(10, sizeof(Data_t));
   mux = xSemaphoreCreateMutex();
   if (xQueue != NULL)
   {
@@ -104,11 +120,11 @@ void setupTasks()
   xTaskCreatePinnedToCore([](void *parameter) -> void {
     BaseType_t xStatus;
     const TickType_t xTicksToWait = pdMS_TO_TICKS(100);
-    Data_t data;
-    data.dateString = "01/05/19";
-    data.timeString = "10:43";
-    data.voltage_V = 5;
-    data.ampere_mA = 100;
+    // Data_t data;   
+    // String dateString = "01/05/19";
+    // String timeString = "10:43";
+    // uint32_t voltage_V = 5;
+    // uint32_t ampere_mA = 100;
 
     Serial.println("Task Recv is Running..");
     for (;;)
@@ -120,7 +136,14 @@ void setupTasks()
       // bzero(_buffer, sizeof(_buffer));
       if (xStatus == pdPASS)
       {
-        sprintf(buffer, "INSERT INTO datalog(date, time, voltage, ampere) VALUES('%s', '%s', %lu, %lu);",  data.dateString, data.timeString, data.voltage_V, data.ampere_mA);
+        Data_t data;    
+        data.dateString = String("01/05/19");
+        data.timeString = String("10:43");
+        data.voltage_V = 5;
+        data.ampere_mA = 100;
+
+        sprintf(buffer, "INSERT INTO datalog(date, time, voltage, ampere) VALUES('%s', '%s', %lu, %lu);",  data.dateString.c_str(), data.timeString.c_str(), data.voltage_V, data.ampere_mA);
+        // sprintf(buffer, "INSERT INTO datalog(date, time, voltage, ampere) VALUES('%s', '%s', %lu, %lu);",  dateString.c_str(), timeString.c_str(), voltage_V, ampere_mA);
         if (db_exec(db1, buffer) == SQLITE_OK)
         {
           Serial.println("INSERT OK.");
@@ -136,9 +159,9 @@ void setupTasks()
       vTaskDelay(10000);
       Serial.println("producerTask is producing...");
       BaseType_t xStatus;
-      for (size_t i = 0; i < 100; i++)
+      for (size_t i = 0; i < 10; i++)
       {
-        const TickType_t xTicksToWait = pdMS_TO_TICKS(300);
+        const TickType_t xTicksToWait = pdMS_TO_TICKS(50);
         Data_t data;
         data.ms = millis();
         Serial.println("> sendTask2 is sending data");
@@ -164,10 +187,15 @@ void setupTasks()
 
 void setup() {
   Serial.begin(115200);
+  delay(10);
   pinMode(2, INPUT_PULLUP);
+  pinMode(relayPin, OUTPUT);
+  pinMode(LED_PIN, OUTPUT);
 
-  setupQueue();
-  setupTasks();
+  digitalWrite(relayPin, relayPinState);
+
+  ina219.begin();
+  ina219.setCalibration_16V_400mA();
 
   pinMode(MISO, INPUT_PULLUP);
   SPI.begin(SCK, MISO, MOSI, CS);
@@ -184,10 +212,30 @@ void setup() {
       return;
     }
   }
+
+  WiFi.disconnect();
+  delay(20);
+  WiFi.mode(WIFI_STA);
+  delay(50);
+  const char *ssid = WIFI_SSID.c_str();
+  const char *pass = WIFI_PASSWORD.c_str();
+  WiFi.begin(ssid, pass);
+  while (WiFi.status() != WL_CONNECTED)
+  {
+    Serial.printf("Connecting to %s:%s\r\n", ssid, pass);
+    delay(300);
+  }
+  Serial.println("WiFi Connected.");
+
+  
+  // setupQueue();
+  // setupTasks();
 }
 
 void loop() {
-  taskYIELD();
+  // taskYIELD();
+  mqtt->loop();
+  // mqtt->sync_advpub("", "CMMC/PLUG-001/$/command", "OFF", false);
 }
 
 uint32_t currentRowId = 0;
@@ -207,11 +255,17 @@ static void NB_IoTTask(void *parameter)
     if (db_exec(db1, buffer, xcallback) == SQLITE_OK)
     {
       Serial.println("QUERY OK.");
+      Serial.println(buffer);
+      Serial.println("");
+      Serial.println("");
     }
     sprintf(buffer, "DELETE FROM datalogger WHERE id = %lu;", currentRowId);
     if (db_exec(db1, buffer) == SQLITE_OK)
     {
       Serial.println("DELETE OK.");
+      Serial.println(buffer);
+      Serial.println("");
+      Serial.println("");
     }
     vTaskDelay(1000);
   }
